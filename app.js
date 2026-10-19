@@ -116,56 +116,7 @@ const DEFAULT_TRIPS = [
     }
 ];
 
-const DEFAULT_BOOKINGS = [
-    {
-        pnr: 'EXP-88102',
-        tripId: 'EX-804',
-        customerName: 'أحمد إبراهيم علي',
-        customerPhone: '01012345678',
-        nationalId: '29508140102345',
-        seats: [1, 2],
-        totalAmount: 360,
-        paymentMethod: 'card',
-        paymentStatus: 'paid',
-        bookingDate: '2026-10-16 10:15',
-        boarded: 1,
-        route: 'القاهرة ⬅️ الإسكندرية',
-        tripDate: new Date().toISOString().split('T')[0],
-        departureTimeLabel: '02:30 م'
-    },
-    {
-        pnr: 'EXP-88103',
-        tripId: 'EX-804',
-        customerName: 'سارة مصطفى كمال',
-        customerPhone: '01288776655',
-        nationalId: '29811050109988',
-        seats: [7],
-        totalAmount: 180,
-        paymentMethod: 'wallet',
-        paymentStatus: 'paid',
-        bookingDate: '2026-10-16 11:30',
-        boarded: 0,
-        route: 'القاهرة ⬅️ الإسكندرية',
-        tripDate: new Date().toISOString().split('T')[0],
-        departureTimeLabel: '02:30 م'
-    },
-    {
-        pnr: 'EXP-88104',
-        tripId: 'EX-804',
-        customerName: 'محمود عبد السلام',
-        customerPhone: '01155443322',
-        nationalId: '29003010107766',
-        seats: [8, 15],
-        totalAmount: 360,
-        paymentMethod: 'cash',
-        paymentStatus: 'pending_cash',
-        bookingDate: '2026-10-16 12:45',
-        boarded: 0,
-        route: 'القاهرة ⬅️ الإسكندرية',
-        tripDate: new Date().toISOString().split('T')[0],
-        departureTimeLabel: '02:30 م'
-    }
-];
+const DEFAULT_BOOKINGS = [];
 
 class BusStationApp {
     constructor() {
@@ -246,12 +197,21 @@ class BusStationApp {
         }
 
         const storedUser = localStorage.getItem('bus_station_current_user');
-        this.currentUser = storedUser ? JSON.parse(storedUser) : {
-            role: 'customer',
-            name: 'أحمد إبراهيم',
-            email: 'ahmed@example.com',
-            phone: '01012345678'
-        };
+        if (storedUser) {
+            try {
+                const u = JSON.parse(storedUser);
+                if (u.email === 'ahmed@example.com' || u.email === 'mahmoud@driver.com' || u.email === 'admin@station.com') {
+                    localStorage.removeItem('bus_station_current_user');
+                    this.currentUser = null;
+                } else {
+                    this.currentUser = u;
+                }
+            } catch (err) {
+                this.currentUser = null;
+            }
+        } else {
+            this.currentUser = null;
+        }
     }
 
     mapApiTrip(t) {
@@ -379,39 +339,20 @@ class BusStationApp {
 
         const label = document.getElementById('login-identifier-label');
         const input = document.getElementById('login-identifier');
+        const pwd = document.getElementById('login-password');
 
         if (role === 'customer') {
-            label.innerHTML = '<i class="fa-solid fa-envelope"></i> البريد الإلكتروني أو الهاتف للعميل';
-            input.value = 'ahmed@example.com';
+            label.innerHTML = '<i class="fa-solid fa-envelope"></i> البريد الإلكتروني أو رقم الهاتف للعميل';
+            input.placeholder = 'name@gmail.com أو 010XXXXXXXX';
         } else if (role === 'driver') {
             label.innerHTML = '<i class="fa-solid fa-id-card"></i> كود السائق أو رقم الهاتف';
-            input.value = '01099887766';
+            input.placeholder = 'driver@gmail.com أو 010XXXXXXXX';
         } else {
-            label.innerHTML = '<i class="fa-solid fa-user-shield"></i> اسم مستخدم الإدارة';
-            input.value = 'admin@station.com';
+            label.innerHTML = '<i class="fa-solid fa-user-shield"></i> بريد أو هاتف مسؤول الإدارة';
+            input.placeholder = 'admin@gmail.com أو 01XXXXXXXXX';
         }
-        document.getElementById('login-password').value = '123456';
-    }
-
-    async quickLogin(role) {
-        if (role === 'customer') {
-            this.currentUser = { role: 'customer', name: 'أحمد إبراهيم', email: 'ahmed@example.com', phone: '01012345678' };
-            this.switchView('customer-view');
-        } else if (role === 'driver') {
-            this.currentUser = { role: 'driver', name: 'محمود حسن السعيد', phone: '01099887766', bus: 'أتوبيس 705' };
-            this.switchView('driver-view');
-        } else if (role === 'admin') {
-            this.currentUser = { role: 'admin', name: 'م. طارق عبد الرحمن', email: 'admin@station.com' };
-            this.switchView('admin-view');
-        }
-        this.saveLocalState();
-        this.updateUserUI();
-        this.notify(`تم تسجيل الدخول: [${this.currentUser.name}]`, 'success');
-    }
-
-    quickFillAndLogin(role) {
-        this.quickLogin(role);
-        this.closeModal('login-modal');
+        input.value = '';
+        if (pwd) pwd.value = '';
     }
 
     // التبديل بين شاشتي تسجيل الدخول وإنشاء حساب جديد
@@ -563,8 +504,7 @@ class BusStationApp {
             }
         }
 
-        this.quickLogin(role);
-        this.closeModal('login-modal');
+        this.notify('بيانات تسجيل الدخول غير صحيحة، يرجى التأكد من البريد وكلمة المرور', 'error');
     }
 
     // ==================== البحث وعرض الرحلات ====================

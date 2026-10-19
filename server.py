@@ -57,9 +57,6 @@ def init_db():
     if 'license_number' not in cols: cursor.execute("ALTER TABLE users ADD COLUMN license_number TEXT")
     if 'bus_number' not in cols: cursor.execute("ALTER TABLE users ADD COLUMN bus_number TEXT")
 
-    cursor.execute("UPDATE users SET first_name = 'أحمد', last_name = 'إبراهيم علي', address = 'القاهرة، مدينة نصر' WHERE email = 'ahmed@example.com' AND (first_name IS NULL OR first_name = '')")
-    cursor.execute("UPDATE users SET first_name = 'محمود', last_name = 'حسن السعيد', address = 'الجيزة، شارع فيصل' WHERE email = 'mahmoud@driver.com' AND (first_name IS NULL OR first_name = '')")
-    cursor.execute("UPDATE users SET first_name = 'طارق', last_name = 'عبد الرحمن', address = 'القاهرة، مصر الجديدة' WHERE email = 'admin@station.com' AND (first_name IS NULL OR first_name = '')")
 
     # جدول السائقين والأسطول
     cursor.execute('''
@@ -128,15 +125,7 @@ def init_db():
 def seed_default_data(cursor, conn):
     today = datetime.now().strftime('%Y-%m-%d')
 
-    # مستخدمين افتراضيين
-    users = [
-        ('أحمد', 'إبراهيم علي', 'أحمد إبراهيم علي', 'ahmed@example.com', '01012345678', 'القاهرة، مدينة نصر، شارع عباس العقاد', '123456', 'customer', '', ''),
-        ('محمود', 'حسن السعيد', 'محمود حسن السعيد', 'mahmoud@driver.com', '01099887766', 'الجيزة، شارع فيصل الرئيسي', '123456', 'driver', 'درجة أولى مهنية 8892', 'أتوبيس 705 (مرسيدس سوبر جيت)'),
-        ('طارق', 'عبد الرحمن', 'م. طارق عبد الرحمن', 'admin@station.com', '01200000000', 'القاهرة، مصر الجديدة', 'admin123', 'admin', '', '')
-    ]
-    cursor.executemany('INSERT OR IGNORE INTO users (first_name, last_name, name, email, phone, address, password, role, license_number, bus_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', users)
-
-    # سائقين
+    # سائقين والأسطول
     drivers = [
         ('DRV-101', 'محمود حسن السعيد', '01099887766', 'أتوبيس 705 (مرسيدس سوبر جيت)', 4.9, 1),
         ('DRV-102', 'إبراهيم كمال الدين', '01122334455', 'أتوبيس 910 (مان ترانس)', 4.8, 1),
@@ -175,17 +164,6 @@ def seed_default_data(cursor, conn):
                       arrival_time_label, duration, trip_date, price, bus_class, bus_class_label, bus_number, driver_name, total_seats, status)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', trips)
-
-    # حجوزات أولية
-    bookings = [
-        ('EXP-88102', 'EX-804', 'أحمد إبراهيم علي', '01012345678', '29508140102345', json.dumps([1, 2]), 360, 'card', 'paid', 1),
-        ('EXP-88103', 'EX-804', 'سارة مصطفى كمال', '01288776655', '29811050109988', json.dumps([7]), 180, 'wallet', 'paid', 0),
-        ('EXP-88104', 'EX-804', 'محمود عبد السلام', '01155443322', '29003010107766', json.dumps([8, 15]), 360, 'cash', 'pending_cash', 0)
-    ]
-    cursor.executemany('''
-    INSERT OR IGNORE INTO bookings (pnr, trip_id, customer_name, customer_phone, national_id, seats, total_amount, payment_method, payment_status, boarded)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', bookings)
 
     conn.commit()
 
