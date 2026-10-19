@@ -12,6 +12,7 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <!-- ملف التنسيقات -->
     <link rel="stylesheet" href="style.css">
+    <script type="module" src="firebase-db.js"></script>
 </head>
 <body>
     <!-- شريط الإشعارات العلوي السريع -->
@@ -61,22 +62,7 @@
         </div>
     </header>
 
-    <!-- شريط التبديل السريع للشرح والتجربة -->
-    <div class="quick-roles-bar">
-        <div class="container">
-            <span class="badge-notice"><i class="fa-solid fa-bolt"></i> وضع التجربة السريعة:</span>
-            <span>انقر للتبديل الفوري بين الحسابات:</span>
-            <button class="demo-chip chip-customer" onclick="app.quickLogin('customer')">
-                <i class="fa-solid fa-user"></i> عميل (أحمد إبراهيم)
-            </button>
-            <button class="demo-chip chip-driver" onclick="app.quickLogin('driver')">
-                <i class="fa-solid fa-id-card"></i> كابتن السائق (محمود حسن)
-            </button>
-            <button class="demo-chip chip-admin" onclick="app.requestAdminAccess()">
-                <i class="fa-solid fa-lock"></i> إدارة المحطة (محمية)
-            </button>
-        </div>
-    </div>
+
 
     <!-- المحتوى الرئيسي -->
     <main class="main-content">
@@ -556,14 +542,6 @@
                     </button>
                 </form>
 
-                <div class="demo-login-shortcuts">
-                    <small>أو دخول تجريبي سريع بنقرة واحدة:</small>
-                    <div class="shortcut-chips">
-                        <button type="button" onclick="app.quickFillAndLogin('customer')">عميل (أحمد إبراهيم)</button>
-                        <button type="button" onclick="app.quickFillAndLogin('driver')">سائق (محمود حسن)</button>
-                        <button type="button" onclick="app.quickFillAndLogin('admin')">إدارة (م. طارق)</button>
-                    </div>
-                </div>
             </div>
 
             <!-- ================= تبويب 2: إنشاء حساب جديد ================= -->
