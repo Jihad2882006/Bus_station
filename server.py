@@ -11,12 +11,18 @@ import os
 import json
 import sqlite3
 import urllib.parse
+import zipfile
+import io
+import xml.sax.saxutils
+import csv
 from http.server import HTTPServer, SimpleHTTPRequestHandler
-from datetime import datetime
+from datetime import datetime, timedelta
 
 PORT = 8080
 DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bus_station.db')
 STATIC_DIR = os.path.dirname(os.path.abspath(__file__))
+EXCEL_FILE = os.path.join(STATIC_DIR, 'registered_users.xlsx')
+CSV_FILE = os.path.join(STATIC_DIR, 'registered_users.csv')
 # كود الأمان وتفويض إدارة المحطة (سري ومخصص لمدير المحطة فقط)
 ADMIN_SECURITY_PASSCODE = "ADMIN@STATION2026"
 
@@ -166,6 +172,257 @@ def seed_default_data(cursor, conn):
     ''', trips)
 
     conn.commit()
+    conn.close()
+
+    # مزامنة وتحديث ملفات الإكسيل (Excel & CSV) عند بدء تشغيل الخادم
+    sync_excel_files()
+
+
+
+
+
+# ==================== أدوات معالجة النصوص والأرقام ====================
+def normalize_input(text):
+    if not text:
+        return ''
+    text = str(text).strip()
+    arabic_digits = '٠١٢٣٤٥٦٧٨٩'
+    english_digits = '0123456789'
+    tr = str.maketrans(arabic_digits, english_digits)
+    return text.translate(tr)
+
+def normalize_phone(phone):
+    p = normalize_input(phone).replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+    if p.startswith('+20'):
+        p = '0' + p[3:]
+    elif p.startswith('0020'):
+        p = '0' + p[4:]
+    elif p.startswith('20') and len(p) == 12:
+        p = '0' + p[2:]
+    return p
+
+
+# ==================== نظام تصدير ومزامنة ملفات الإكسيل (Excel Live Sync) ====================
+def escape_xml(val):
+    if val is None:
+        return ''
+    return xml.sax.saxutils.escape(str(val))
+
+def col_letter(col_idx):
+    res = ''
+    while col_idx > 0:
+        col_idx, rem = divmod(col_idx - 1, 26)
+        res = chr(65 + rem) + res
+    return res
+
+def build_sheet_xml(headers, rows):
+    xml = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>']
+    xml.append('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">')
+    xml.append('<sheetViews><sheetView tabSelected="1" workbookViewId="0" rightToLeft="1"/></sheetViews>')
+    xml.append('<sheetData>')
+    
+    # صف العناوين الرئيسية
+    xml.append('<row r="1">')
+    for c_idx, h in enumerate(headers, 1):
+        cell_ref = f"{col_letter(c_idx)}1"
+        xml.append(f'<c r="{cell_ref}" t="inlineStr" s="1"><is><t>{escape_xml(h)}</t></is></c>')
+    xml.append('</row>')
+    
+    # صفوف البيانات
+    for r_idx, row in enumerate(rows, 2):
+        xml.append(f'<row r="{r_idx}">')
+        for c_idx, val in enumerate(row, 1):
+            cell_ref = f"{col_letter(c_idx)}{r_idx}"
+            xml.append(f'<c r="{cell_ref}" t="inlineStr" s="0"><is><t>{escape_xml(val)}</t></is></c>')
+        xml.append('</row>')
+        
+    xml.append('</sheetData>')
+    xml.append('</worksheet>')
+    return ''.join(xml)
+
+def generate_excel_bytes(sheets):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        content_types = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+                         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
+                         '  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
+                         '  <Default Extension="xml" ContentType="application/xml"/>',
+                         '  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
+                         '  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>']
+        for idx in range(1, len(sheets) + 1):
+            content_types.append(f'  <Override PartName="/xl/worksheets/sheet{idx}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>')
+        content_types.append('</Types>')
+        z.writestr('[Content_Types].xml', '\n'.join(content_types))
+        
+        z.writestr('_rels/.rels', '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>''')
+
+        wb_rels = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+                   '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">']
+        for idx in range(1, len(sheets) + 1):
+            wb_rels.append(f'  <Relationship Id="rId{idx}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{idx}.xml"/>')
+        wb_rels.append(f'  <Relationship Id="rId{len(sheets)+1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>')
+        wb_rels.append('</Relationships>')
+        z.writestr('xl/_rels/workbook.xml.rels', '\n'.join(wb_rels))
+
+        wb_xml = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+                  '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">',
+                  '  <sheets>']
+        for idx, (name, _, _) in enumerate(sheets, 1):
+            wb_xml.append(f'    <sheet name="{escape_xml(name)}" sheetId="{idx}" r:id="rId{idx}"/>')
+        wb_xml.append('  </sheets>')
+        wb_xml.append('</workbook>')
+        z.writestr('xl/workbook.xml', '\n'.join(wb_xml))
+
+        styles_xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="2">
+    <font><sz val="11"/><name val="Segoe UI"/></font>
+    <font><b/><sz val="11"/><name val="Segoe UI"/><color rgb="FFFFFFFF"/></font>
+  </fonts>
+  <fills count="3">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FF1E293B"/></patternFill></fill>
+  </fills>
+  <borders count="1"><border><left/><right/><top/><bottom/></border></borders>
+  <cellXfs count="2">
+    <xf fontId="0" fillId="0" borderId="0"/>
+    <xf fontId="1" fillId="2" borderId="0" applyFont="1" applyFill="1"/>
+  </cellXfs>
+</styleSheet>'''
+        z.writestr('xl/styles.xml', styles_xml)
+
+        for idx, (_, headers, rows) in enumerate(sheets, 1):
+            z.writestr(f'xl/worksheets/sheet{idx}.xml', build_sheet_xml(headers, rows))
+
+    return buf.getvalue()
+
+def sync_excel_files():
+    """توليد ومزامنة ملف الإكسيل و CSV لحظياً مع كل تسجيل جديد أو حجز على المنصة"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # 1. جلب بيانات المستخدمين والعملاء المسجلين
+        cursor.execute('SELECT * FROM users ORDER BY id DESC')
+        user_rows = cursor.fetchall()
+
+        user_headers = [
+            'مُعرّف الحساب (ID)',
+            'الاسم بالكامل',
+            'الاسم الأول',
+            'الاسم الأخير',
+            'رقم الهاتف المحمول',
+            'البريد الإلكتروني (جيميل)',
+            'العنوان ومحل الإقامة',
+            'نوع الحساب والصفة',
+            'رقم رخصة القيادة',
+            'رقم الحافلة المخصصة',
+            'تاريخ وتوقيت التسجيل'
+        ]
+
+        roles_ar = {
+            'customer': 'عميل مسافر',
+            'driver': 'سائق حافلة',
+            'admin': 'مدير المحطة'
+        }
+
+        user_data = []
+        for u in user_rows:
+            user_data.append([
+                u['id'],
+                u['name'] or f"{u['first_name']} {u['last_name']}",
+                u['first_name'] or '',
+                u['last_name'] or '',
+                u['phone'] or '',
+                u['email'] or '',
+                u['address'] or '',
+                roles_ar.get(u['role'], u['role'] or ''),
+                u['license_number'] or '---',
+                u['bus_number'] or '---',
+                u['created_at'] or ''
+            ])
+
+        # 2. جلب سجل الحجوزات والتذاكر
+        cursor.execute('''
+            SELECT b.*, t.from_city, t.to_city, t.departure_time_label, t.trip_date, t.bus_number
+            FROM bookings b
+            LEFT JOIN trips t ON b.trip_id = t.id
+            ORDER BY b.booking_date DESC
+        ''')
+        booking_rows = cursor.fetchall()
+
+        booking_headers = [
+            'رقم الحجز (PNR)',
+            'اسم العميل المسافر',
+            'رقم الهاتف',
+            'الرقم القومي',
+            'خط السير (من - إلى)',
+            'موعد وتاريخ الرحلة',
+            'رقم الحافلة',
+            'المقاعد المحجوزة',
+            'إجمالي المبلغ المستحق',
+            'طريقة السداد',
+            'حالة الدفع',
+            'صعود الحافلة',
+            'تاريخ وتوقيت الحجز'
+        ]
+
+        pay_methods = {'card': 'بطاقة بنكية / فيزا', 'wallet': 'محفظة ذكية (فودافون كاش)', 'cash': 'سداد نقدي بالمحطة'}
+        pay_status = {'paid': 'مدفوعة بالكامل', 'pending_cash': 'حجز مبدئي - دفع بالمحطة'}
+
+        booking_data = []
+        for b in booking_rows:
+            seats_str = ''
+            try:
+                seats_list = json.loads(b['seats'])
+                seats_str = ' ، '.join(map(str, seats_list))
+            except:
+                seats_str = str(b['seats'] or '')
+
+            route = f"{b['from_city'] or ''} ⬅️ {b['to_city'] or ''}" if b['from_city'] else b['trip_id']
+            time_date = f"{b['trip_date'] or ''} ({b['departure_time_label'] or ''})"
+            boarded_status = 'تم الصعود ✅' if b['boarded'] == 1 else 'في انتظار الصعود ⏳'
+
+            booking_data.append([
+                b['pnr'],
+                b['customer_name'] or '',
+                b['customer_phone'] or '',
+                b['national_id'] or '',
+                route,
+                time_date,
+                b['bus_number'] or '---',
+                seats_str,
+                f"{b['total_amount']} ج.م",
+                pay_methods.get(b['payment_method'], b['payment_method']),
+                pay_status.get(b['payment_status'], b['payment_status']),
+                boarded_status,
+                b['booking_date'] or ''
+            ])
+
+        conn.close()
+
+        # كتابة ملف XLSX متكامل ومتعدد الصفحات
+        sheets = [
+            ('المستخدمين المسجلين', user_headers, user_data),
+            ('سجل الحجوزات والتذاكر', booking_headers, booking_data)
+        ]
+        xlsx_bytes = generate_excel_bytes(sheets)
+        with open(EXCEL_FILE, 'wb') as f:
+            f.write(xlsx_bytes)
+
+        # كتابة ملف CSV مع BOM UTF-8 لفتح الحروف العربية بشكل تلقائي وسلس في إكسيل
+        with open(CSV_FILE, 'w', encoding='utf-8-sig', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(user_headers)
+            writer.writerows(user_data)
+
+        print(f"📊 [Excel Sync] تم تحديث ملف الإكسيل بنجاح ({len(user_data)} مستخدم، {len(booking_data)} حجز) في: {EXCEL_FILE}")
+    except Exception as e:
+        print(f"⚠️ خطأ أثناء تحديث ملف الإكسيل: {e}")
 
 
 # ==================== 2. معالج الطلبات (HTTP API Handler) ====================
@@ -235,6 +492,13 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
                 # 6. رحلات السائق الحالي
                 elif path == '/api/driver/manifest':
                     self.handle_get_driver_manifest()
+                # 7. تصدير ملف الإكسيل المباشر المربوط بالمنصة
+                elif path == '/api/export/excel':
+                    self.handle_export_excel()
+                elif path == '/api/export/csv':
+                    self.handle_export_csv()
+                elif path == '/api/export/status':
+                    self.handle_export_status()
                 else:
                     self.send_json({'error': 'نقطة النهاية غير موجودة'}, 404)
             except Exception as e:
@@ -299,15 +563,16 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
     # ==================== 3. معالجات العمليات (Controllers) ====================
 
     def handle_register(self, body):
-        first_name = body.get('first_name', '').strip()
-        last_name = body.get('last_name', '').strip()
-        phone = body.get('phone', '').strip()
-        email = body.get('email', '').strip()
-        address = body.get('address', '').strip()
+        first_name = normalize_input(body.get('first_name', '')).strip()
+        last_name = normalize_input(body.get('last_name', '')).strip()
+        phone = normalize_phone(body.get('phone', ''))
+        raw_phone = normalize_input(body.get('phone', '')).strip()
+        email = normalize_input(body.get('email', '')).lower().strip()
+        address = normalize_input(body.get('address', '')).strip()
         password = body.get('password', '').strip()
         role = body.get('role', 'customer').strip()
-        license_number = body.get('license_number', '').strip()
-        bus_number = body.get('bus_number', '').strip()
+        license_number = normalize_input(body.get('license_number', '')).strip()
+        bus_number = normalize_input(body.get('bus_number', '')).strip()
         admin_code = body.get('admin_security_code', '').strip()
 
         if not first_name or not last_name or not phone or not email or not address or not password:
@@ -327,12 +592,15 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # فحص عدم تكرار البريد أو الهاتف
-        cursor.execute('SELECT id FROM users WHERE email = ? OR phone = ?', (email, phone))
+        # فحص عدم تكرار البريد أو الهاتف (بشكل غير حساس لحالة الأحرف)
+        cursor.execute('''
+        SELECT id FROM users 
+        WHERE LOWER(TRIM(email)) = LOWER(?) OR TRIM(phone) = ? OR TRIM(phone) = ?
+        ''', (email, phone, raw_phone))
         existing = cursor.fetchone()
         if existing:
             conn.close()
-            self.send_json({'error': 'عذراً، هذا البريد الإلكتروني أو رقم الهاتف مسجل بالفعل مسبقاً!'}, 409)
+            self.send_json({'error': 'عذراً، هذا البريد الإلكتروني أو رقم الهاتف مسجل بالفعل مسبقاً! يمكنك تسجيل الدخول مباشرة.'}, 409)
             return
 
         cursor.execute('''
@@ -353,6 +621,9 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
         conn.commit()
         conn.close()
 
+        # مزامنة وتحديث ملف الإكسيل فوراً بالبيانات الجديدة
+        sync_excel_files()
+
         user_data = {
             'id': user_id,
             'first_name': first_name,
@@ -368,14 +639,17 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
 
         self.send_json({
             'success': True,
-            'message': f'🎉 أهلاً بك يا {first_name}! تم إنشاء حسابك بنجاح.',
+            'message': f'🎉 أهلاً بك يا {first_name}! تم إنشاء حسابك وحفظ بياناتك وتحديث ملف الإكسيل المربوط بالمنصة.',
             'user': user_data
         })
 
     def handle_login(self, body):
         role = body.get('role', None)
-        identifier = body.get('identifier', '').strip()
-        password = body.get('password', '').strip()
+        raw_identifier = body.get('identifier', '')
+        password = body.get('password', '')
+
+        identifier = normalize_input(raw_identifier).strip()
+        phone_norm = normalize_phone(raw_identifier)
 
         if not identifier or not password:
             self.send_json({'error': 'يرجى إدخال البريد الإلكتروني أو رقم الهاتف وكلمة المرور'}, 400)
@@ -384,33 +658,41 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        if role:
-            cursor.execute('''
-            SELECT id, first_name, last_name, name, email, phone, address, role, license_number, bus_number
-            FROM users 
-            WHERE (email = ? OR phone = ?) AND password = ? AND role = ?
-            LIMIT 1
-            ''', (identifier, identifier, password, role))
-        else:
-            cursor.execute('''
-            SELECT id, first_name, last_name, name, email, phone, address, role, license_number, bus_number
-            FROM users 
-            WHERE (email = ? OR phone = ?) AND password = ?
-            LIMIT 1
-            ''', (identifier, identifier, password))
+        # البحث المرن والذكي عن المستخدم (بالبريد الإلكتروني غير الحساس للأحرف، أو برقم الهاتف، أو بالاسم)
+        cursor.execute('''
+        SELECT id, first_name, last_name, name, email, phone, address, role, license_number, bus_number, password
+        FROM users 
+        WHERE (
+            LOWER(TRIM(email)) = LOWER(?) 
+            OR TRIM(phone) = ? 
+            OR TRIM(phone) = ?
+            OR LOWER(TRIM(name)) = LOWER(?)
+            OR LOWER(TRIM(first_name)) = LOWER(?)
+        )
+        LIMIT 1
+        ''', (identifier, identifier, phone_norm, identifier, identifier))
 
         user = cursor.fetchone()
         conn.close()
 
         if user:
-            user_data = dict(user)
-            self.send_json({
-                'success': True,
-                'message': f'مرحباً بك مجدداً {user_data.get("name")}',
-                'user': user_data
-            })
+            # التحقق من كلمة المرور
+            db_password = user['password']
+            if db_password == password or db_password == password.strip():
+                user_data = dict(user)
+                user_data.pop('password', None)
+                self.send_json({
+                    'success': True,
+                    'message': f'مرحباً بك مجدداً {user_data.get("name")}',
+                    'user': user_data
+                })
+                return
+            else:
+                self.send_json({'error': 'كلمة المرور غير صحيحة! يرجى التأكد من كتابة كلمة المرور بدقة.'}, 401)
+                return
         else:
-            self.send_json({'error': 'بيانات الدخول غير صحيحة! تأكد من البريد أو الهاتف وكلمة المرور'}, 401)
+            self.send_json({'error': 'لم يتم العثور على حساب بهذا البريد أو الهاتف! يرجى التأكد من كتابة البريد أو الهاتف المسجل أو إنشاء حساب جديد.'}, 401)
+            return
 
     def handle_get_trips(self):
         params = self.get_query_params()
@@ -529,6 +811,9 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
         conn.commit()
         conn.close()
 
+        # مزامنة وتحديث ملف الإكسيل فوراً بالبيانات الجديدة
+        sync_excel_files()
+
         # بيانات التذكرة الصادرة
         ticket_data = {
             'pnr': pnr,
@@ -611,12 +896,16 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
 
         conn.commit()
         conn.close()
+
+        # مزامنة وتحديث ملف الإكسيل فوراً بالبيانات الجديدة
+        sync_excel_files()
         self.send_json({'success': True, 'trip_id': new_id, 'message': 'تمت إضافة الرحلة للجدول بنجاح'})
 
     def handle_passenger_checkin(self, body):
         pnr = body.get('pnr')
         conn = get_db_connection()
         cursor = conn.cursor()
+
         cursor.execute('SELECT boarded FROM bookings WHERE pnr = ?', (pnr,))
         row = cursor.fetchone()
         if not row:
@@ -628,6 +917,9 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
         cursor.execute('UPDATE bookings SET boarded = ? WHERE pnr = ?', (new_boarded, pnr))
         conn.commit()
         conn.close()
+
+        # مزامنة وتحديث ملف الإكسيل فوراً بالبيانات الجديدة
+        sync_excel_files()
         self.send_json({'success': True, 'boarded': new_boarded})
 
     def handle_update_trip_status(self, body):
@@ -638,6 +930,9 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
         cursor.execute('UPDATE trips SET status = ? WHERE id = ?', (status, trip_id))
         conn.commit()
         conn.close()
+
+        # مزامنة وتحديث ملف الإكسيل فوراً بالبيانات الجديدة
+        sync_excel_files()
         self.send_json({'success': True, 'status': status})
 
     def handle_get_driver_manifest(self):
@@ -695,6 +990,62 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
                 'total_drivers': total_drivers
             }
         })
+
+    # ----------------- خدمات تصدير وتحميل الإكسيل المباشر -----------------
+    def handle_export_excel(self):
+        sync_excel_files()
+        if not os.path.exists(EXCEL_FILE):
+            self.send_json({'error': 'ملف الإكسيل غير متوفر حالياً'}, 404)
+            return
+
+        with open(EXCEL_FILE, 'rb') as f:
+            data = f.read()
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        self.send_header('Content-Disposition', 'attachment; filename="registered_users.xlsx"')
+        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(data)
+
+    def handle_export_csv(self):
+        sync_excel_files()
+        if not os.path.exists(CSV_FILE):
+            self.send_json({'error': 'ملف CSV غير متوفر حالياً'}, 404)
+            return
+
+        with open(CSV_FILE, 'rb') as f:
+            data = f.read()
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/csv; charset=utf-8-sig')
+        self.send_header('Content-Disposition', 'attachment; filename="registered_users.csv"')
+        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(data)
+
+    def handle_export_status(self):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM users')
+        users_count = cursor.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) FROM bookings')
+        bookings_count = cursor.fetchone()[0]
+        conn.close()
+
+        self.send_json({
+            'success': True,
+            'users_count': users_count,
+            'bookings_count': bookings_count,
+            'excel_file_path': EXCEL_FILE,
+            'csv_file_path': CSV_FILE,
+            'excel_file_size': os.path.getsize(EXCEL_FILE) if os.path.exists(EXCEL_FILE) else 0,
+            'last_sync': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        })
+
+
 
 
 # ==================== 4. تشغيل الخادم ====================

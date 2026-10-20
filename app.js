@@ -157,14 +157,15 @@ class BusStationApp {
                 options.body = JSON.stringify(data);
             }
             const res = await fetch(`${API_BASE}${endpoint}`, options);
+            const resData = await res.json().catch(() => null);
             if (!res.ok) {
-                const errData = await res.json().catch(() => ({}));
-                throw new Error(errData.error || `خطأ في الخادم (${res.status})`);
+                const errorMsg = (resData && resData.error) ? resData.error : `خطأ في الخادم (${res.status})`;
+                return { success: false, error: errorMsg };
             }
-            return await res.json();
+            return resData;
         } catch (err) {
             console.warn(`[API] فشل الاتصال بنقطة ${endpoint}:`, err.message);
-            return null;
+            return { success: false, error: 'فشل الاتصال بالخادم. يرجى التأكد من تشغيل الخادم.', networkError: true };
         }
     }
 
@@ -250,6 +251,8 @@ class BusStationApp {
             paymentStatus: b.payment_status,
             bookingDate: b.booking_date,
             boarded: b.boarded === 1,
+            from_city: b.from_city,
+            to_city: b.to_city,
             route: `${b.from_city || ''} ⬅️ ${b.to_city || ''}`,
             departureTimeLabel: b.departure_time_label || ''
         };
@@ -271,7 +274,11 @@ class BusStationApp {
             });
         });
 
-        document.getElementById('btn-open-login').addEventListener('click', () => this.openModal('login-modal'));
+        document.getElementById('btn-open-login').addEventListener('click', () => {
+            this.selectLoginRole('customer');
+            this.switchAuthMode('login');
+            this.openModal('login-modal');
+        });
         document.getElementById('btn-logout').addEventListener('click', () => {
             this.currentUser = null;
             this.saveLocalState();
@@ -448,8 +455,8 @@ class BusStationApp {
                 else if (role === 'admin') this.switchView('admin-view');
                 else this.switchView('customer-view');
                 return;
-            } else if (res && res.error) {
-                this.notify(res.error, 'error');
+            } else {
+                this.notify((res && res.error) ? res.error : 'فشل إنشاء الحساب! يرجى مراجعة البيانات المدخلة.', 'error');
                 return;
             }
         }
@@ -498,8 +505,8 @@ class BusStationApp {
                 else if (this.currentUser.role === 'admin') this.switchView('admin-view');
                 else this.switchView('customer-view');
                 return;
-            } else if (res && res.error) {
-                this.notify(res.error, 'error');
+            } else {
+                this.notify((res && res.error) ? res.error : 'بيانات تسجيل الدخول غير صحيحة، يرجى التأكد من البريد أو الهاتف وكلمة المرور', 'error');
                 return;
             }
         }
@@ -866,26 +873,33 @@ class BusStationApp {
             return;
         }
 
-        container.innerHTML = this.bookings.map(b => `
+        container.innerHTML = this.bookings.map(b => {
+            const isPaid = b.paymentStatus === 'paid' || b.payment_status === 'paid';
+            const badgeBg = isPaid ? '#dcfce7' : '#fef3c7';
+            const badgeColor = isPaid ? '#166534' : '#92400e';
+            const badgeLabel = isPaid ? 'مدفوعة' : 'دفع بالمحطة';
+
+            return `
             <div class="mini-ticket-card">
                 <div style="display:flex; justify-content:space-between; align-items:center;">
                     <strong><i class="fa-solid fa-ticket"></i> ${b.pnr}</strong>
-                    <span style="font-size:11px; padding:2px 8px; border-radius:10px; background:${b.paymentStatus==='paid'?'#dcfce7':'#fef3c7'}; color:${b.paymentStatus==='paid'?'#166534':'#92400e'}">
-                        ${b.paymentStatus === 'paid' ? 'مدفوعة' : 'دفع بالمحطة'}
+                    <span style="font-size:11px; padding:3px 10px; border-radius:12px; background:${badgeBg}; color:${badgeColor}; font-weight:700;">
+                        ${badgeLabel}
                     </span>
                 </div>
-                <div style="font-size:13px; font-weight:700;">${b.route}</div>
+                <div style="font-size:13.5px; font-weight:800; margin: 6px 0;">${b.route}</div>
                 <div style="font-size:12px; color:var(--muted);">
-                    <span>مقاعد: <strong>${(b.seats || []).join(',')}</strong></span> | 
-                    <span>المبلغ: <strong>${b.totalAmount} ج.م</strong></span>
+                    <span>مقاعد: ${(b.seats || []).join(',')}</span> | 
+                    <span>المبلغ: <strong>${b.totalAmount || b.total_amount} ج.م</strong></span>
                 </div>
-                <div style="display:flex; gap:8px; margin-top:6px;">
-                    <button class="btn-secondary-action" style="padding:4px 10px; font-size:12px;" onclick="app.viewTicketByPNR('${b.pnr}')">
-                        <i class="fa-solid fa-eye"></i> عرض التذكرة والـ QR
+                <div style="display:flex; gap:8px; margin-top:8px;">
+                    <button class="btn-secondary-action" style="padding:5px 12px; font-size:12px;" onclick="app.viewTicketByPNR('${b.pnr}')">
+                        <i class="fa-solid fa-eye"></i> عرض بطاقة التذكرة والـ QR
                     </button>
                 </div>
             </div>
-        `).join('');
+            `;
+        }).join('');
     }
 
     viewTicketByPNR(pnr) {
