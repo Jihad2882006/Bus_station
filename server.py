@@ -201,6 +201,38 @@ def normalize_phone(phone):
         p = '0' + p[2:]
     return p
 
+EN_TO_AR_LAYOUT = {
+    'q': 'ض', 'w': 'ص', 'e': 'ث', 'r': 'ق', 't': 'ف', 'y': 'غ', 'u': 'ع', 'i': 'ه', 'o': 'خ', 'p': 'ح',
+    'a': 'ش', 's': 'س', 'd': 'ي', 'f': 'ب', 'g': 'ل', 'h': 'ا', 'j': 'ت', 'k': 'ن', 'l': 'م',
+    'z': 'ئ', 'x': 'ء', 'c': 'ؤ', 'v': 'ر', 'n': 'ى', 'm': 'ة'
+}
+AR_TO_EN_LAYOUT = {v: k for k, v in EN_TO_AR_LAYOUT.items()}
+
+def check_password_match(db_pwd, input_pwd):
+    """التحقق الذكي من كلمة المرور مع دعم حالة الأحرف، لوحة المفاتيح العربية/الإنجليزية، والأرقام"""
+    if not db_pwd or not input_pwd:
+        return False
+    db_clean = normalize_input(str(db_pwd).strip())
+    inp_clean = normalize_input(str(input_pwd).strip())
+
+    # 1. تطابق تام
+    if db_clean == inp_clean:
+        return True
+    # 2. تطابق غير حساس لحالة الأحرف (لتفادي مشكلة زر Caps Lock أو الحرف الكبير في الهواتف)
+    if db_clean.lower() == inp_clean.lower():
+        return True
+    # 3. تطابق مع تحويل لغة لوحة المفاتيح (عربي ↔ إنجليزي مثل asd مقابل شسي)
+    mapped_en = ''.join(AR_TO_EN_LAYOUT.get(ch, ch) for ch in inp_clean.lower())
+    if db_clean.lower() == mapped_en:
+        return True
+    mapped_ar = ''.join(EN_TO_AR_LAYOUT.get(ch, ch) for ch in inp_clean.lower())
+    if db_clean.lower() == mapped_ar:
+        return True
+    db_mapped_en = ''.join(AR_TO_EN_LAYOUT.get(ch, ch) for ch in db_clean.lower())
+    if db_mapped_en == inp_clean.lower():
+        return True
+    return False
+
 
 # ==================== نظام تصدير ومزامنة ملفات الإكسيل (Excel Live Sync) ====================
 def escape_xml(val):
@@ -676,11 +708,12 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
         conn.close()
 
         if user:
-            # التحقق من كلمة المرور
+            # التحقق الذكي من كلمة المرور
             db_password = user['password']
-            if db_password == password or db_password == password.strip():
+            if check_password_match(db_password, password):
                 user_data = dict(user)
                 user_data.pop('password', None)
+                print(f"✅ [Login Success] مستخدم: {user_data.get('name')} (id={user_data.get('id')}, role={user_data.get('role')})")
                 self.send_json({
                     'success': True,
                     'message': f'مرحباً بك مجدداً {user_data.get("name")}',
@@ -688,9 +721,11 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
                 })
                 return
             else:
+                print(f"❌ [Login Failed: Wrong Password] identifier='{identifier}', user='{user['name']}'")
                 self.send_json({'error': 'كلمة المرور غير صحيحة! يرجى التأكد من كتابة كلمة المرور بدقة.'}, 401)
                 return
         else:
+            print(f"❌ [Login Failed: User Not Found] identifier='{identifier}'")
             self.send_json({'error': 'لم يتم العثور على حساب بهذا البريد أو الهاتف! يرجى التأكد من كتابة البريد أو الهاتف المسجل أو إنشاء حساب جديد.'}, 401)
             return
 
