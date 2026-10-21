@@ -42,7 +42,11 @@
 - `GET /api/bookings` : سجل الحجوزات الكامل لمتابعة الدفع.
 - `POST /api/driver/checkin` : تأكيد صعود الراكب للحافلة (خاص بالسائق).
 - `POST /api/driver/trip-status` : تحديث حالة الرحلة (جاهزة / في الطريق / انتهت).
+- `POST /api/driver/assign-trip` : إسناد رحلة لسائق وتحديث رقم الحافلة.
+- `GET /api/driver/manifest` : كشف ركاب رحلة السائق الحالية.
 - `GET /api/admin/stats` : إحصائيات الإيرادات والتذاكر المباعة من قاعدة البيانات.
+- `GET /api/export/excel` : تحميل ومزامنة ملف Excel المباشر.
+- `GET /api/export/csv` : تحميل ومزامنة ملف CSV المباشر.
 
 ---
 

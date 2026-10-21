@@ -8,6 +8,9 @@
 
 import sys
 import os
+import time
+import signal
+import subprocess
 import json
 import sqlite3
 import urllib.parse
@@ -567,6 +570,9 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
                 # 6. تحديث حالة الرحلة (للسائق)
                 elif path == '/api/driver/trip-status':
                     self.handle_update_trip_status(body)
+                # 7. تعيين رحلة لسائق
+                elif path == '/api/driver/assign-trip':
+                    self.handle_driver_assign_trip(body)
                 else:
                     self.send_json({'error': 'نقطة النهاية غير موجودة'}, 404)
             except Exception as e:
@@ -641,7 +647,7 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
         ''', (first_name, last_name, full_name, email, phone, address, password, role, license_number, bus_number))
         user_id = cursor.lastrowid
 
-        # إذا كان الحساب لسائق، نضيفه لأسطول سائقي المحطة
+        # إذا كان الحساب لسائق، نضيفه لأسطول سائقي المحطة ونخصص له رحلة فورية
         if role == 'driver':
             drv_id = f"DRV-{user_id + 100}"
             bus_info = bus_number if bus_number else "أتوبيس معتمد بالمحطة"
@@ -649,6 +655,15 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
             INSERT OR REPLACE INTO drivers (id, name, phone, bus_info, rating, is_active)
             VALUES (?, ?, ?, ?, 5.0, 1)
             ''', (drv_id, full_name, phone, bus_info))
+
+            # تعيين رحلة مباشرة للسائق ليعمل حسابه فوراً مع بياناته
+            new_trip_id = f"EX-{int(datetime.now().timestamp() % 900) + 100:03d}"
+            today = datetime.now().strftime('%Y-%m-%d')
+            cursor.execute('''
+            INSERT OR IGNORE INTO trips (id, from_city, from_station, to_city, to_station, departure_time, departure_time_label,
+                              arrival_time_label, duration, trip_date, price, bus_class, bus_class_label, bus_number, driver_name, total_seats, status)
+            VALUES (?, 'القاهرة', 'موقف رمسيس / الترجمان', 'الإسكندرية', 'موقف محرم بك', '14:30', '02:30 م', '05:30 م', '3 ساعات', ?, 180, 'VIP', 'VIP فاخر', ?, ?, 28, 'ready')
+            ''', (new_trip_id, today, bus_info, full_name))
 
         conn.commit()
         conn.close()
@@ -972,12 +987,19 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
 
     def handle_get_driver_manifest(self):
         params = self.get_query_params()
-        driver_name = params.get('driver_name', ['محمود'])[0]
+        driver_name = params.get('driver_name', [''])[0]
+        trip_id = params.get('trip_id', [''])[0]
 
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM trips WHERE driver_name LIKE ? ORDER BY departure_time ASC LIMIT 1', (f"%{driver_name}%",))
-        trip = cursor.fetchone()
+
+        trip = None
+        if trip_id:
+            cursor.execute('SELECT * FROM trips WHERE id = ?', (trip_id,))
+            trip = cursor.fetchone()
+        elif driver_name:
+            cursor.execute('SELECT * FROM trips WHERE driver_name LIKE ? OR bus_number LIKE ? ORDER BY departure_time ASC LIMIT 1', (f"%{driver_name}%", f"%{driver_name}%"))
+            trip = cursor.fetchone()
 
         if not trip:
             cursor.execute('SELECT * FROM trips ORDER BY departure_time ASC LIMIT 1')
@@ -996,8 +1018,29 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
                     pass
                 passengers.append(pd)
 
+        driver_trips = []
+        if driver_name:
+            cursor.execute('SELECT * FROM trips WHERE driver_name LIKE ? OR bus_number LIKE ? ORDER BY departure_time ASC', (f"%{driver_name}%", f"%{driver_name}%"))
+            driver_trips = [dict(t) for t in cursor.fetchall()]
+
         conn.close()
-        self.send_json({'success': True, 'trip': trip_dict, 'passengers': passengers})
+        self.send_json({'success': True, 'trip': trip_dict, 'passengers': passengers, 'driver_trips': driver_trips})
+
+    def handle_driver_assign_trip(self, body):
+        trip_id = body.get('trip_id')
+        driver_name = body.get('driver_name')
+        bus_number = body.get('bus_number')
+        if not trip_id or not driver_name:
+            self.send_json({'error': 'معرف الرحلة واسم السائق مطلوبان'}, 400)
+            return
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('UPDATE trips SET driver_name = ?, bus_number = COALESCE(?, bus_number) WHERE id = ?', (driver_name, bus_number, trip_id))
+        conn.commit()
+        conn.close()
+        sync_excel_files()
+        self.send_json({'success': True, 'message': 'تم تعيين الرحلة للسائق بنجاح'})
 
     def handle_get_stats(self):
         conn = get_db_connection()
@@ -1084,10 +1127,42 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
 
 
 # ==================== 4. تشغيل الخادم ====================
+class ReusableHTTPServer(HTTPServer):
+    allow_reuse_address = True
+
+def free_port(port):
+    """تحرير المنفذ تلقائياً في حال كان قيد الاستخدام من عملية سابقة"""
+    try:
+        output = subprocess.check_output(["lsof", "-t", f"-i:{port}"], stderr=subprocess.DEVNULL)
+        pids = [int(p.strip()) for p in output.decode().split() if p.strip()]
+        current_pid = os.getpid()
+        for pid in pids:
+            if pid != current_pid:
+                print(f"⚠️ جاري تحرير المنفذ {port} من العملية السابقة (PID: {pid})...")
+                os.kill(pid, signal.SIGTERM)
+                time.sleep(0.5)
+    except Exception:
+        try:
+            subprocess.run(["fuser", "-k", f"{port}/tcp"], stderr=subprocess.DEVNULL)
+            time.sleep(0.5)
+        except Exception:
+            pass
+
 def run_server():
     init_db()
     server_address = ('', PORT)
-    httpd = HTTPServer(server_address, BusStationAPIHandler)
+    
+    try:
+        httpd = ReusableHTTPServer(server_address, BusStationAPIHandler)
+    except OSError as e:
+        if getattr(e, 'errno', None) == 98 or "Address already in use" in str(e):
+            print(f"⚠️ المنفذ {PORT} مشغول حالياً، جاري إخلائه وإعادة تشغيل الخادم تلقائياً...")
+            free_port(PORT)
+            time.sleep(1)
+            httpd = ReusableHTTPServer(server_address, BusStationAPIHandler)
+        else:
+            raise e
+
     print("=" * 60)
     print(f" 🚀 خادم الباك إند لمحطة الأتوبيس يعمل الآن على: http://localhost:{PORT}")
     print(f" 📂 المجلد الثابت: {STATIC_DIR}")

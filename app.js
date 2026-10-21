@@ -128,6 +128,8 @@ class BusStationApp {
         this.selectedSeats = [];
         this.currentFilter = 'all';
         this.isBackendConnected = false;
+        this.selectedDriverTripId = null;
+        this.currentDriverTrips = [];
     }
 
     async init() {
@@ -909,12 +911,100 @@ class BusStationApp {
 
     // ==================== بوابة السائق وتأكيد الصعود ====================
     async renderDriverPortal() {
-        const driverTrips = this.trips.filter(t => t.driverName.includes('محمود'));
-        const activeTrip = driverTrips[0] || this.trips[0];
+        if (!this.currentUser || this.currentUser.role !== 'driver') {
+            return;
+        }
+
+        const driver = this.currentUser;
+        const driverFullName = (driver.name || `${driver.first_name || ''} ${driver.last_name || ''}`).trim() || 'كابتن معتمد';
+        const busNumber = driver.bus_number || 'حافلة معتمدة بالمحطة';
+        const phone = driver.phone || 'غير مسجل';
+        const license = driver.license_number || 'درجة مهنية معتمدة';
+
+        // 1. تحديث بيانات بروفايل السائق في الواجهة
+        const nameEl = document.getElementById('drv-name-display');
+        if (nameEl) nameEl.textContent = `الكابتن: ${driverFullName}`;
+
+        const busEl = document.getElementById('drv-bus-number');
+        if (busEl) busEl.textContent = busNumber;
+
+        const phoneEl = document.getElementById('drv-phone');
+        if (phoneEl) phoneEl.textContent = phone;
+
+        const licenseEl = document.getElementById('drv-license');
+        if (licenseEl) licenseEl.textContent = license;
+
+        const avatarEl = document.getElementById('drv-avatar-initials');
+        if (avatarEl) {
+            const initial = (driver.first_name || driverFullName || 'ك').trim().charAt(0).toUpperCase();
+            avatarEl.textContent = initial;
+        }
+
+        // 2. البحث عن رحلات السائق (تطابق الاسم أو رقم الأتوبيس)
+        const dNameLower = driverFullName.toLowerCase();
+        const dBusLower = busNumber.toLowerCase();
+
+        let myTrips = this.trips.filter(t => {
+            const tDriver = (t.driverName || '').toLowerCase();
+            const tBus = (t.busNumber || '').toLowerCase();
+            return (tDriver && (tDriver.includes(dNameLower) || dNameLower.includes(tDriver))) ||
+                   (dBusLower && tBus && tBus.includes(dBusLower));
+        });
+
+        // إذا لم يكن لدى السائق رحلة مسجلة، نربط له أول رحلة متاحة ليعمل حسابه فوراً
+        if (myTrips.length === 0 && this.trips.length > 0) {
+            const firstTrip = this.trips[0];
+            firstTrip.driverName = driverFullName;
+            firstTrip.busNumber = `أتوبيس (${busNumber})`;
+            myTrips = [firstTrip];
+            if (this.isBackendConnected) {
+                this.apiRequest('/driver/assign-trip', 'POST', {
+                    trip_id: firstTrip.id,
+                    driver_name: driverFullName,
+                    bus_number: firstTrip.busNumber
+                });
+            }
+        }
+
+        this.currentDriverTrips = myTrips;
+
+        // إحصائيات السائق
+        const tripsCountEl = document.getElementById('drv-trips-count');
+        if (tripsCountEl) tripsCountEl.textContent = myTrips.length;
+
+        const totalPassengers = myTrips.reduce((acc, t) => {
+            const tripBookings = this.bookings.filter(b => (b.tripId || b.trip_id) === t.id);
+            const count = tripBookings.reduce((sAcc, b) => sAcc + (Array.isArray(b.seats) ? b.seats.length : 1), 0);
+            return acc + count;
+        }, 0);
+
+        const passengersCountEl = document.getElementById('drv-passengers-count');
+        if (passengersCountEl) passengersCountEl.textContent = totalPassengers;
+
+        // 3. تحديث قائمة اختيار الرحلة (Trip Selector)
+        const selectorEl = document.getElementById('driver-trip-selector');
+        if (selectorEl) {
+            if (myTrips.length === 0) {
+                selectorEl.innerHTML = `<option value="">لا توجد رحلات مسندة لك حالياً</option>`;
+            } else {
+                selectorEl.innerHTML = myTrips.map(t => {
+                    const statusText = t.status === 'active' ? '🟢 في الطريق' : (t.status === 'completed' ? '🏁 انتهت' : '🟡 جاهزة');
+                    const isSelected = this.selectedDriverTripId === t.id ? 'selected' : '';
+                    return `<option value="${t.id}" ${isSelected}>#${t.id}: ${t.from} ⬅️ ${t.to} (${t.departureTimeLabel || t.departureTime}) - ${statusText}</option>`;
+                }).join('');
+            }
+        }
+
+        // اختيار الرحلة الحالية
+        if (!this.selectedDriverTripId || !myTrips.find(t => t.id === this.selectedDriverTripId)) {
+            this.selectedDriverTripId = myTrips.length > 0 ? myTrips[0].id : null;
+        }
+
+        const activeTrip = myTrips.find(t => t.id === this.selectedDriverTripId) || myTrips[0];
 
         if (activeTrip) {
             document.getElementById('current-trip-title').textContent = `رحلة رقم #${activeTrip.id}: ${activeTrip.from} ⬅️ ${activeTrip.to}`;
-            document.getElementById('current-trip-time').innerHTML = `<i class="fa-regular fa-clock"></i> موعد المغادرة: ${activeTrip.departureTimeLabel} | ${activeTrip.fromStation} | ${activeTrip.busNumber}`;
+            document.getElementById('current-trip-time').innerHTML = `<i class="fa-regular fa-clock"></i> موعد المغادرة: ${activeTrip.departureTimeLabel || activeTrip.departureTime} | ${activeTrip.fromStation} | ${activeTrip.busNumber}`;
 
             const statusEl = document.getElementById('current-trip-status');
             if (activeTrip.status === 'active') {
@@ -929,7 +1019,89 @@ class BusStationApp {
             }
 
             this.renderDriverPassengers(activeTrip.id);
+        } else {
+            document.getElementById('current-trip-title').textContent = 'لا توجد رحلة محددة حالياً';
+            document.getElementById('current-trip-time').textContent = 'اضغط على زر (تولي قيادة رحلة جديدة) لإسناد رحلة لك';
+            const tbody = document.getElementById('driver-passenger-tbody');
+            if (tbody) tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:var(--muted); padding:20px;">لا يوجد ركاب لعدم وجود رحلة محددة</td></tr>`;
         }
+
+        // 4. جدول الرحلات المخصصة للسائق
+        const upcomingListEl = document.getElementById('driver-upcoming-list');
+        if (upcomingListEl) {
+            if (myTrips.length === 0) {
+                upcomingListEl.innerHTML = `<div style="text-align:center; padding:25px; background:#fff; border-radius:8px; border:1px dashed var(--border);"><p style="color:var(--muted); font-size:14px; margin-bottom:10px;">لا توجد رحلات مخصصة لجدولك حالياً.</p><button type="button" class="btn-primary-action" onclick="app.claimNextAvailableTrip()"><i class="fa-solid fa-plus-circle"></i> تولي قيادة أول رحلة متاحة</button></div>`;
+            } else {
+                upcomingListEl.innerHTML = myTrips.map(tr => {
+                    const trBookings = this.bookings.filter(b => (b.tripId || b.trip_id) === tr.id);
+                    const bookedCount = trBookings.reduce((sum, b) => sum + (Array.isArray(b.seats) ? b.seats.length : 1), 0);
+                    const isSelected = tr.id === this.selectedDriverTripId;
+
+                    return `
+                    <div style="background:#fff; border:${isSelected ? '2px solid var(--primary)' : '1px solid var(--border)'}; border-radius:10px; padding:16px; margin-bottom:12px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; box-shadow:var(--shadow-sm);">
+                        <div>
+                            <div style="display:flex; align-items:center; gap:8px;">
+                                <strong style="font-size:16px; color:var(--primary);">#${tr.id}</strong>
+                                <span style="font-size:15px; font-weight:800;">${tr.from} ⬅️ ${tr.to}</span>
+                                <span class="badge" style="background:#e0f2fe; color:#0369a1; padding:2px 8px; border-radius:12px; font-size:11px;">${tr.busClassLabel || tr.busClass}</span>
+                                <span style="font-size:12px; font-weight:700; color:${tr.status === 'active' ? '#166534' : (tr.status === 'completed' ? '#0369a1' : '#b45309')};">
+                                    ${tr.status === 'active' ? '🟢 جارية' : (tr.status === 'completed' ? '🏁 مكتملة' : '🟡 جاهزة')}
+                                </span>
+                            </div>
+                            <div style="font-size:13px; color:var(--muted); margin-top:4px;">
+                                <i class="fa-regular fa-clock"></i> ${tr.departureTimeLabel || tr.departureTime} | <i class="fa-solid fa-bus"></i> ${tr.busNumber} | <i class="fa-solid fa-users"></i> ${bookedCount} راكب مسجل
+                            </div>
+                        </div>
+                        <div style="display:flex; gap:8px;">
+                            <button type="button" class="btn-secondary-action" style="padding:6px 14px; font-size:12px; ${isSelected ? 'background:var(--primary); color:#fff;' : ''}" onclick="app.onDriverSelectTrip('${tr.id}')">
+                                <i class="fa-solid fa-clipboard-user"></i> ${isSelected ? 'المعروضة حالياً' : 'عرض كشف الركاب'}
+                            </button>
+                        </div>
+                    </div>
+                    `;
+                }).join('');
+            }
+        }
+    }
+
+    onDriverSelectTrip(tripId) {
+        this.selectedDriverTripId = tripId;
+        this.renderDriverPortal();
+        const card = document.querySelector('.active-trip-card');
+        if (card) card.scrollIntoView({ behavior: 'smooth' });
+    }
+
+    async claimNextAvailableTrip() {
+        if (!this.currentUser || this.currentUser.role !== 'driver') {
+            this.notify('يجب تسجيل الدخول كسائق أولاً', 'error');
+            return;
+        }
+
+        const driverFullName = (this.currentUser.name || `${this.currentUser.first_name || ''} ${this.currentUser.last_name || ''}`).trim();
+        const busNumber = this.currentUser.bus_number || 'حافلة المحطة';
+
+        // البحث عن رحلة غير مسندة لهذا السائق
+        const unassignedTrip = this.trips.find(t => !t.driverName || !t.driverName.toLowerCase().includes(driverFullName.toLowerCase()));
+        if (!unassignedTrip) {
+            this.notify('جميع الرحلات مسندة لك بالفعل!', 'info');
+            return;
+        }
+
+        unassignedTrip.driverName = driverFullName;
+        unassignedTrip.busNumber = `أتوبيس (${busNumber})`;
+        this.selectedDriverTripId = unassignedTrip.id;
+
+        if (this.isBackendConnected) {
+            await this.apiRequest('/driver/assign-trip', 'POST', {
+                trip_id: unassignedTrip.id,
+                driver_name: driverFullName,
+                bus_number: unassignedTrip.busNumber
+            });
+        }
+
+        this.saveLocalState();
+        this.renderDriverPortal();
+        this.notify(`🎉 تم إسناد الرحلة #${unassignedTrip.id} (${unassignedTrip.from} ⬅️ ${unassignedTrip.to}) لحسابك وحافلتك بنجاح!`, 'success');
     }
 
     renderDriverPassengers(tripId) {
@@ -938,7 +1110,7 @@ class BusStationApp {
 
         const tripBookings = this.bookings.filter(b => (b.tripId || b.trip_id) === tripId);
         if (tripBookings.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:var(--muted);">لا يوجد ركاب مسجلين حتى الآن</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:var(--muted); padding:20px;">لا يوجد ركاب مسجلين لهذه الرحلة حتى الآن</td></tr>`;
             return;
         }
 
@@ -947,16 +1119,59 @@ class BusStationApp {
                 <td><strong style="color:var(--primary); font-size:15px;">${(b.seats || []).join(' ، ')}</strong></td>
                 <td><strong>${b.customerName || b.customer_name}</strong></td>
                 <td>${b.customerPhone || b.customer_phone}</td>
-                <td><span style="font-family:monospace; color:#b45309;">${b.pnr}</span></td>
-                <td>${(b.paymentStatus || b.payment_status) === 'paid' ? 'مدفوع' : 'نقداً'}</td>
+                <td><span style="font-family:monospace; color:#b45309; font-weight:700;">${b.pnr}</span></td>
+                <td>${(b.paymentStatus || b.payment_status) === 'paid' ? '<span style="color:#166534; font-weight:700;">مدفوع</span>' : '<span style="color:#b45309; font-weight:700;">نقداً بالمحطة</span>'}</td>
                 <td>
-                    <span style="padding:3px 8px; border-radius:12px; font-size:11px; font-weight:700; background:${b.boarded ? '#dcfce7':'#fee2e2'}; color:${b.boarded ? '#166534':'#991b1b'};">
+                    <span style="padding:4px 10px; border-radius:12px; font-size:11px; font-weight:700; background:${b.boarded ? '#dcfce7':'#fee2e2'}; color:${b.boarded ? '#166534':'#991b1b'};">
                         ${b.boarded ? '✅ صعد للحافلة' : '❌ لم يصعد بعد'}
                     </span>
                 </td>
                 <td>
                     <button class="btn-checkin-action ${b.boarded ? 'checked' : ''}" onclick="app.togglePassengerBoarding('${b.pnr}')">
-                        ${b.boarded ? 'تم التأكيد' : 'تأكيد صعود الراكب'}
+                        ${b.boarded ? 'إلغاء التأكيد' : 'تأكيد صعود الراكب'}
+                    </button>
+                </td>
+            </tr>
+        `).join('');
+    }
+
+    filterDriverPassengers() {
+        const query = (document.getElementById('passenger-search-input')?.value || '').trim().toLowerCase();
+        const activeTripId = this.selectedDriverTripId || (this.currentDriverTrips.length > 0 ? this.currentDriverTrips[0].id : (this.trips[0] ? this.trips[0].id : null));
+        if (!activeTripId) return;
+
+        const tbody = document.getElementById('driver-passenger-tbody');
+        if (!tbody) return;
+
+        const tripBookings = this.bookings.filter(b => (b.tripId || b.trip_id) === activeTripId);
+        const filtered = tripBookings.filter(b => {
+            const name = (b.customerName || b.customer_name || '').toLowerCase();
+            const pnr = (b.pnr || '').toLowerCase();
+            const phone = (b.customerPhone || b.customer_phone || '').toLowerCase();
+            const seats = (b.seats || []).join(' ');
+            return name.includes(query) || pnr.includes(query) || phone.includes(query) || seats.includes(query);
+        });
+
+        if (filtered.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:var(--muted); padding:20px;">لا توجد نتائج مطابقة لبحثك في هذه الرحلة</td></tr>`;
+            return;
+        }
+
+        tbody.innerHTML = filtered.map(b => `
+            <tr>
+                <td><strong style="color:var(--primary); font-size:15px;">${(b.seats || []).join(' ، ')}</strong></td>
+                <td><strong>${b.customerName || b.customer_name}</strong></td>
+                <td>${b.customerPhone || b.customer_phone}</td>
+                <td><span style="font-family:monospace; color:#b45309; font-weight:700;">${b.pnr}</span></td>
+                <td>${(b.paymentStatus || b.payment_status) === 'paid' ? '<span style="color:#166534; font-weight:700;">مدفوع</span>' : '<span style="color:#b45309; font-weight:700;">نقداً بالمحطة</span>'}</td>
+                <td>
+                    <span style="padding:4px 10px; border-radius:12px; font-size:11px; font-weight:700; background:${b.boarded ? '#dcfce7':'#fee2e2'}; color:${b.boarded ? '#166534':'#991b1b'};">
+                        ${b.boarded ? '✅ صعد للحافلة' : '❌ لم يصعد بعد'}
+                    </span>
+                </td>
+                <td>
+                    <button class="btn-checkin-action ${b.boarded ? 'checked' : ''}" onclick="app.togglePassengerBoarding('${b.pnr}')">
+                        ${b.boarded ? 'إلغاء التأكيد' : 'تأكيد صعود الراكب'}
                     </button>
                 </td>
             </tr>
@@ -964,13 +1179,14 @@ class BusStationApp {
     }
 
     async togglePassengerBoarding(pnr) {
+        const activeTripId = this.selectedDriverTripId || (this.currentDriverTrips.length > 0 ? this.currentDriverTrips[0].id : (this.trips[0] ? this.trips[0].id : null));
         if (this.isBackendConnected) {
             const res = await this.apiRequest('/driver/checkin', 'POST', { pnr: pnr });
             if (res && res.success) {
                 const b = this.bookings.find(bk => bk.pnr === pnr);
                 if (b) b.boarded = res.boarded === 1;
-                this.renderDriverPassengers(b ? (b.tripId || b.trip_id) : this.trips[0].id);
-                this.notify(res.boarded === 1 ? 'تم تسجيل صعود الراكب بنجاح في قاعدة البيانات' : 'تم إلغاء حالة الصعود', 'info');
+                this.renderDriverPassengers(activeTripId);
+                this.notify(res.boarded === 1 ? '✅ تم تأكيد صعود الراكب للحافلة بنجاح' : 'تم إلغاء حالة الصعود', 'info');
                 return;
             }
         }
@@ -979,13 +1195,13 @@ class BusStationApp {
         if (booking) {
             booking.boarded = !booking.boarded;
             this.saveLocalState();
-            this.renderDriverPassengers(booking.tripId || booking.trip_id);
-            this.notify(booking.boarded ? 'تم تأكيد صعود الراكب' : 'تم إلغاء التأكيد', 'info');
+            this.renderDriverPassengers(activeTripId);
+            this.notify(booking.boarded ? '✅ تم تأكيد صعود الراكب' : 'تم إلغاء التأكيد', 'info');
         }
     }
 
     async updateTripStatus(newStatus) {
-        const activeTrip = this.trips[0];
+        const activeTrip = this.trips.find(t => t.id === this.selectedDriverTripId) || (this.currentDriverTrips.length > 0 ? this.currentDriverTrips[0] : this.trips[0]);
         if (!activeTrip) return;
 
         if (this.isBackendConnected) {
@@ -994,7 +1210,8 @@ class BusStationApp {
         activeTrip.status = newStatus;
         this.saveLocalState();
         this.renderDriverPortal();
-        this.notify(`تم تحديث حالة الرحلة إلى: ${newStatus === 'active' ? 'في الطريق' : 'انتهت'}`, 'success');
+        const statusLabel = newStatus === 'active' ? 'الحافلة في الطريق الآن' : (newStatus === 'completed' ? 'انتهت الرحلة وتم الوصول' : 'جاهزة للانطلاق');
+        this.notify(`✅ تم تحديث حالة الرحلة #${activeTrip.id} إلى: ${statusLabel}`, 'success');
     }
 
     // ==================== لوحة تحكم الإدارة (Admin) ====================
@@ -1079,7 +1296,21 @@ class BusStationApp {
         if (target) target.classList.add('active');
     }
 
-    openNewTripModal() { this.openModal('new-trip-modal'); }
+    openNewTripModal() {
+        const driverSelect = document.getElementById('new-trip-driver');
+        const busInput = document.getElementById('new-trip-bus');
+        if (driverSelect && this.drivers && this.drivers.length > 0) {
+            driverSelect.innerHTML = this.drivers.map(d => `<option value="${d.name}" data-bus="${d.bus_info || d.bus || ''}">${d.name}</option>`).join('');
+            if (busInput && driverSelect.options[0]) {
+                busInput.value = driverSelect.options[0].getAttribute('data-bus') || '';
+            }
+            driverSelect.onchange = () => {
+                const opt = driverSelect.options[driverSelect.selectedIndex];
+                if (busInput && opt) busInput.value = opt.getAttribute('data-bus') || '';
+            };
+        }
+        this.openModal('new-trip-modal');
+    }
 
     async handleNewTripSubmit(e) {
         e.preventDefault();
