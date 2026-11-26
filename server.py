@@ -570,6 +570,8 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
                 # 6. تحديث حالة الرحلة (للسائق)
                 elif path == '/api/driver/trip-status':
                     self.handle_update_trip_status(body)
+                elif path == '/api/chat':
+                    self.handle_chat(body)
                 # 7. تعيين رحلة لسائق
                 elif path == '/api/driver/assign-trip':
                     self.handle_driver_assign_trip(body)
