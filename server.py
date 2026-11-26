@@ -599,6 +599,10 @@ class BusStationAPIHandler(SimpleHTTPRequestHandler):
             return
 
         self.send_json({'error': 'طريقة غير مدعومة'}, 405)
+    def handle_chat(self, body):
+        result = chatbot.chat(body.get('messages', []), DB_FILE,
+                              sync_excel_files, self.client_address[0])
+        self.send_json(result, 200 if 'text' in result else 400)
 
     # ==================== 3. معالجات العمليات (Controllers) ====================
 
