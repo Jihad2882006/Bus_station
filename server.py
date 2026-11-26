@@ -5,7 +5,7 @@
 خادم الباك إند المتكامل وقاعدة البيانات (Python + SQLite)
 يقدم واجهة برمجية كاملة (RESTful API) ويخدم ملفات الفرونت إند.
 """
-
+import chatbot
 import sys
 import os
 import time
